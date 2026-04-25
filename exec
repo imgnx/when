@@ -1,0 +1,142 @@
+#!/bin/zsh
+
+emulate -L zsh
+setopt local_options pipefail no_unset
+
+integer depth=1
+integer use_bat=0
+integer use_limit=1
+integer max_items=10
+integer user_set_n=0
+integer show_breadcrumb=0
+
+typeset -a ignore_dirs ignore_files
+ignore_dirs=(.git node_modules dist build .next .out .cache coverage vendor venv __pycache__)
+ignore_files=(.DS_Store)
+typeset tree_ignore="${(j:|:)ignore_dirs}|${(j:|:)ignore_files}"
+
+typeset -a prune_expr
+prune_expr=()
+typeset d
+for d in $ignore_dirs
+do
+    prune_expr+=(-name "$d" -o)
+done
+(( ${#prune_expr} )) && unset 'prune_expr[-1]'
+
+typeset -a args
+args=("${argv[@]}")
+
+while (( ${#args} ))
+do
+    case "$args[1]" in
+        -n)
+            args=("${(@)args[2,-1]}")
+            if (( ! ${#args} )) || [[ ${args[1]} != <-> ]] || (( args[1] < 1 ))
+            then
+                echo "when: -n requires a positive integer" >&2
+                exit 1
+            fi
+            max_items=$args[1]
+            use_limit=1
+            user_set_n=1
+            ;;
+        -n*)
+            typeset n="${args[1]#-n}"
+            if [[ $n != <-> ]] || (( n < 1 ))
+            then
+                echo "when: -n requires a positive integer" >&2
+                exit 1
+            fi
+            max_items=$n
+            use_limit=1
+            user_set_n=1
+            ;;
+    esac
+    args=("${(@)args[2,-1]}")
+done
+
+if (( ${argv[(I)-vvv]} ))
+then
+    depth=999
+    use_bat=1
+    (( ! user_set_n )) && use_limit=0
+    show_breadcrumb=1
+elif (( ${argv[(I)-vv]} ))
+then
+    depth=6
+    use_bat=1
+    (( ! user_set_n )) && use_limit=0
+    show_breadcrumb=1
+elif (( ${argv[(I)-v]} ))
+then
+    depth=3
+    use_bat=1
+    (( ! user_set_n )) && use_limit=0
+    show_breadcrumb=1
+fi
+
+typeset target="."
+
+if (( show_breadcrumb ))
+then
+    typeset -a bc_files
+    bc_files=()
+
+    while IFS= read -r bc
+    do
+        bc_files+=("$bc")
+    done < <(
+        find "$target" \
+            \( -type d \( ${prune_expr[@]} \) -prune \) -o \
+            \( -type f -name ".breadcrumb" -print \)
+    )
+
+    if (( ${#bc_files} ))
+    then
+        echo "== .breadcrumb hits =="
+
+        typeset bc
+        integer i=0
+        for bc in $bc_files
+        do
+            (( use_limit )) && (( ++i > max_items )) && break
+
+            typeset dir="${bc:h}"
+            typeset changed
+            changed="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$bc" 2>/dev/null || echo "?")"
+
+            print -r -- "-- "$'\033''[38;2;255;205;0m'"$dir"$'\033''[0m'"  (.breadcrumb changed: $changed)"
+
+            tree -acCDhL1r \
+                -I "$tree_ignore" \
+                "$dir" | { (( use_limit )) && head -n "$max_items" || cat; }
+
+            echo
+        done
+    fi
+fi
+
+typeset -a find_cmd
+typeset stat_fmt=$'%m\t%N'
+find_cmd=(find "$target")
+(( depth != 999 )) && find_cmd+=(-maxdepth "$depth")
+find_cmd+=(
+    '(' -type d '(' ${prune_expr[@]} ')' -prune ')' -o
+    '(' -type f
+)
+typeset f
+for f in $ignore_files
+do
+    find_cmd+=( ! -name "$f" )
+done
+find_cmd+=(-exec stat -f "$stat_fmt" {} + ')')
+
+"${find_cmd[@]}" | sort -nr \
+    | { (( use_limit )) && head -n "$max_items" || cat } \
+    | while IFS=$'\t' read -r ts file
+	do
+	    print -r -- "$(date -r "$ts" '+%Y-%m-%d %H:%M:%S')  $file"
+	done | {
+    (( use_bat )) && bat --paging=never -l log || cat
+}
