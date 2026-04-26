@@ -2,6 +2,7 @@
 
 emulate -L zsh
 setopt local_options pipefail no_unset
+unsetopt xtrace verbose
 
 integer depth=1
 integer use_bat=0
@@ -9,10 +10,11 @@ integer use_limit=1
 integer max_items=10
 integer user_set_n=0
 integer show_breadcrumb=0
+integer show_recent_areas=1
 
 typeset -a ignore_dirs ignore_files
 ignore_dirs=(.git node_modules dist build .next .out .cache coverage vendor venv __pycache__)
-ignore_files=(.DS_Store)
+ignore_files=(.DS_Store .breadcrumb)
 typeset tree_ignore="${(j:|:)ignore_dirs}|${(j:|:)ignore_files}"
 
 typeset -a prune_expr
@@ -62,18 +64,24 @@ then
     use_bat=1
     (( ! user_set_n )) && use_limit=0
     show_breadcrumb=1
+    show_recent_areas=0
 elif (( ${argv[(I)-vv]} ))
 then
     depth=6
     use_bat=1
     (( ! user_set_n )) && use_limit=0
     show_breadcrumb=1
+    show_recent_areas=0
 elif (( ${argv[(I)-v]} ))
 then
-    depth=3
+    depth=4
     use_bat=1
-    (( ! user_set_n )) && use_limit=0
+    (( ! user_set_n )) && max_items=40
     show_breadcrumb=1
+    show_recent_areas=0
+else
+    depth=3
+    (( ! user_set_n )) && max_items=20
 fi
 
 typeset target="."
@@ -82,6 +90,7 @@ if (( show_breadcrumb ))
 then
     typeset -a bc_files
     bc_files=()
+    typeset bc dir changed
 
     while IFS= read -r bc
     do
@@ -96,21 +105,21 @@ then
     then
         echo "== .breadcrumb hits =="
 
-        typeset bc
         integer i=0
         for bc in $bc_files
         do
             (( use_limit )) && (( ++i > max_items )) && break
 
-            typeset dir="${bc:h}"
-            typeset changed
+            dir="${bc:h}"
             changed="$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$bc" 2>/dev/null || echo "?")"
 
             print -r -- "-- "$'\033''[38;2;255;205;0m'"$dir"$'\033''[0m'"  (.breadcrumb changed: $changed)"
 
             tree -acCDhL1r \
                 -I "$tree_ignore" \
-                "$dir" | { (( use_limit )) && head -n "$max_items" || cat; }
+                "$dir" | {
+                    (( use_limit )) && awk -v limit="$max_items" 'NR <= limit' || cat
+                }
 
             echo
         done
@@ -132,8 +141,50 @@ do
 done
 find_cmd+=(-exec stat -f "$stat_fmt" {} + ')')
 
+if (( show_recent_areas ))
+then
+    "${find_cmd[@]}" | sort -nr | awk -F '\t' -v limit="$max_items" '
+        {
+            file=$2
+            dir=file
+            sub(/\/[^\/]*$/, "", dir)
+            if (dir == file) {
+                dir="."
+            }
+            if (!(dir in first_ts)) {
+                first_ts[dir]=$1
+                order[++seen]=dir
+            }
+            counts[dir]++
+        }
+        END {
+            if (!seen) {
+                exit
+            }
+            print "== recent areas =="
+            for (i = 1; i <= seen && i <= limit; i++) {
+                dir=order[i]
+                printf "%s\t%s\t%d\n", first_ts[dir], dir, counts[dir]
+            }
+            print ""
+        }
+    ' | while IFS=$'\t' read -r ts dir count
+    do
+        if [[ $ts == "== recent areas ==" || -z $ts ]]
+        then
+            print -r -- "$ts"
+        else
+            noun="files"
+            (( count == 1 )) && noun="file"
+            print -r -- "$(date -r "$ts" '+%Y-%m-%d %H:%M:%S')  $dir  ($count recent $noun)"
+        fi
+    done
+
+    echo "== recent files =="
+fi
+
 "${find_cmd[@]}" | sort -nr \
-    | { (( use_limit )) && head -n "$max_items" || cat } \
+    | { (( use_limit )) && awk -v limit="$max_items" 'NR <= limit' || cat } \
     | while IFS=$'\t' read -r ts file
 	do
 	    print -r -- "$(date -r "$ts" '+%Y-%m-%d %H:%M:%S')  $file"
